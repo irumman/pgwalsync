@@ -1,0 +1,8 @@
+masterHost=10.119.68.36
+masterOutboundWal=/opt/pgdata/backup/outboundwal
+localInboundWal=/opt/pgdata/backup/inboundwal
+slaveConf=/opt/msp/pkg/fourspeed/pgWALSync/cfg/slaves.conf
+maxNumberFileToCopy=10
+maxNumberFileToRemove=10
+maxFileAllowedInOutboundwal=100
+maxWaitTimeForAck=10 #max time in minute to wait for a slave ack before discard a slave
