@@ -17,6 +17,10 @@ REVISION=1.0
 # Common Commands
 remote_copy="scp -q"
 remote_shell="ssh -q"
+local_copy="cp -i"
+local_rename="mv"
+local_remove="rm -f"
+local_file_create="touch"
 compression_cmd="gzip -c"
 
 #confFile="/opt/msp/pkg/fourspeed/pgWALSync/cfg/pgwalsync.conf"
@@ -27,7 +31,7 @@ listOfWalFiles=${processDir}/listOfWalFiles
 storeLastWALFileRecieved=${processDir}/storeLastWALFileRecieved
 ackFileForLastWALRecieved=${processDir}/ackLastWALRecieved
 pauseFile=${processDir}/walcopier.pause
-
+listOfAlreadyCopied=${processDir}/listOfAlreadyCopied
 
 DEBUG=0
 DRYRUN=0
@@ -219,6 +223,21 @@ makeLocalInboundDir () {
 } #makeLocalInboundDir
 
 
+
+checkAlreadyCopiedFile () {
+  debugPrint "checkAlreadyCopiedFile ()  ..."
+  debugPrint "find  ${localInboundWal} -name '0*' -type f  | sort -k 1nr > ${listOfAlreadyCopied}"
+  find  ${localInboundWal} -name '0*'  -type f | sort -k 1nr > ${listOfAlreadyCopied}
+  lastFileCopied=""
+  lastFileCopied=`tail -1   ${listOfAlreadyCopied}`
+  debugPrint "lastFileCopied=${lastFileCopied}"
+  baseFileName=`basename ${lastFileCopied}`
+  lastWALFileRecieved=${masterOutboundWal}/${baseFileName}
+  debugPrint "lastWALFileRecieved=${lastWALFileRecieved}"
+  ${local_remove} ${listOfAlreadyCopied}
+  debugPrint "checkAlreadyCopiedFile ()  ... DONE"
+}
+
 findLastWalFileRecieved () {
 	debugPrint "findLastWalFileRecieved(): Finding last WAL file recieved ..."
 	debugPrint "storeLastWALFileRecieved=${storeLastWALFileRecieved}"
@@ -227,14 +246,18 @@ findLastWalFileRecieved () {
 	  lastWALFileRecieved=`cat ${storeLastWALFileRecieved} | awk ' { print $1 } '`
 	else
 	  lastWALFileRecieved=""
+	  checkAlreadyCopiedFile 
+	  
 	fi
+	debugPrint "lastWALFileRecieved=${lastWALFileRecieved}"
+  debugPrint "findLastWalFileRecieved(): ... DONE"
 } #findLastWalFileRecieved
 
 ackMaster () {
   debugPrint "ackMaster (): Acknowledge master"
   lastWalFile=`cat ${storeLastWALFileRecieved}`
   
-  localSlaveIP=`hostname -I`
+  localSlaveIP=`hostname -i`
 	debugPrint "localSlaveIP=${localSlaveIP}"
 	localSlaveIP=`echo ${localSlaveIP} | sed 's/\./_/g' ` # Modify all . (dots) to _ (underscore)
 	
@@ -431,47 +454,54 @@ then
     
 	  logPrint "LOG: Copying File: ${walFileName}\n"
 	  
-	  if [ ${compressedCopy} = "true" ];
+	  baseWalFileName=`basename ${walFileName}`
+	  vAlreadyCopiedFileName=${localInboundWal}/${baseWalFileName}
+	  debugPrint "vAlreadyCopiedFileName=${vAlreadyCopiedFileName}"
+	  if [ -f ${vAlreadyCopiedFileName} ]; #File already copied
 	  then
-	     debugPrint "Compressed Copy"
-	     baseFileName=`basename ${walFileName}`
-	     debugPrint "${remote_shell} ${masterHost} \"gzip -c ${walFileName}\" | gunzip > ${localInboundWal}/${baseFileName}"
-			 if [ ${DRYRUN} -eq 0 ]; 
-			 then
-         ${remote_shell} ${masterHost} "gzip -c ${walFileName}" | gunzip > ${localInboundWal}/${baseFileName}
-		     if [ $? -gt 0 ]; 
-		     then
-		       critical_error "FATAL: Failed to copy ${walFileName} with compression from master"
-		     fi
-	     fi #if [ ${DRYRUN} -eq 0 ]; 
+	     logPrint "WARNING: ${walFileName} already exists in ${localInboundWal}\n"
 	  else
-	      debugPrint "Normal copy"
-			  debugPrint "${remote_copy}  ${masterHost}:${walFileName} ${localInboundWal}"
-			  if [ ${DRYRUN} -eq 0 ]; 
-			  then
-			     ${remote_copy}  ${masterHost}:${walFileName} ${localInboundWal}
+	     
+		  if [ ${compressedCopy} = "true" ];
+		  then
+		     debugPrint "Compressed Copy"
+		     baseFileName=`basename ${walFileName}`
+		     debugPrint "${remote_shell} ${masterHost} \"gzip -c ${walFileName}\" | gunzip > ${localInboundWal}/${baseFileName}"
+				 if [ ${DRYRUN} -eq 0 ]; 
+				 then
+	         ${remote_shell} ${masterHost} "gzip -c ${walFileName}" | gunzip > ${localInboundWal}/${baseFileName}
 			     if [ $? -gt 0 ]; 
 			     then
-			       critical_error "FATAL: Failed to copy ${walFileName} from master"
+			       critical_error "FATAL: Failed to copy ${walFileName} with compression from master"
 			     fi
-			  fi 
-	  fi # if [ ${compressedCopy} = "true" ]
-		
-		let i=${i}+1
-		debugPrint "Copied file Number ${i}"
-		if [ $i -ge ${maxNumberFileToCopy} ];
-		then
-			logPrint "LOG: Stop copying file as maxNumberFileToCopy (${maxNumberFileToCopy}) reached\n" 
-		break
-		fi
-
-	    
-	  logPrint  "OK\n"  
+		     fi #if [ ${DRYRUN} -eq 0 ]; 
+		  else
+		      debugPrint "Normal copy"
+				  debugPrint "${remote_copy}  ${masterHost}:${walFileName} ${localInboundWal}"
+				  if [ ${DRYRUN} -eq 0 ]; 
+				  then
+				     ${remote_copy}  ${masterHost}:${walFileName} ${localInboundWal}
+				     if [ $? -gt 0 ]; 
+				     then
+				       critical_error "FATAL: Failed to copy ${walFileName} from master"
+				     fi
+				  fi 
+		  fi # if [ ${compressedCopy} = "true" ]
+			
+			let i=${i}+1
+			debugPrint "Copied file Number ${i}"
+			if [ $i -ge ${maxNumberFileToCopy} ];
+			then
+				logPrint "LOG: Stop copying file as maxNumberFileToCopy (${maxNumberFileToCopy}) reached\n" 
+			  break
+			fi
+	
+		  debugPrint "Saving last recieved WAL file names"
+		  debugPrint "echo ${walFileName} > ${storeLastWALFileRecieved}" 
+		  echo ${walFileName} > ${storeLastWALFileRecieved}
+		  logPrint  "OK\n"
+	  fi #if [ ${vFileExists} -gt 0 ]
 	  
-	  debugPrint "Saving last recieved WAL file names"
-	  
-	  debugPrint "echo ${walFileName} > ${storeLastWALFileRecieved}" 
-	  echo ${walFileName} > ${storeLastWALFileRecieved}
 	done
 	debugPrint "Done"
 	ackMaster	
