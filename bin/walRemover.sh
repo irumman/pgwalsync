@@ -36,7 +36,11 @@ listOfFilesToRemove=${processDir}/listOfFilesToRemove
 pauseFile=${processDir}/walremover.pause
 slaveDiscardFile=${processDir}/SLAVE_DISCARDED
 previousAckFile=${processDir}/previousAckFile
+pendingRemoveList=${processDir}/pendingRemoveList
 noSlaveMode=0
+
+
+gvStartFromPendingList=0
 
 ### Library ###
 
@@ -85,6 +89,17 @@ getFileDateTime () {
 # Return $dt; call with assign to a variable like dt=`getFileDateTime ${fileName} 
 }
 
+
+checkFileIsEmpty () {
+ vFilePath=${1}
+ vLines=`cat ${vFilePath} | wc -l`
+ if [ ${vLines} -eq 0 ];  #file is empty
+ then 
+   echo "true" 
+ else  
+   echo "false" 
+ fi
+}
 
 
 #### End of Library ###
@@ -283,8 +298,8 @@ generateListOfAckWalFilesForSlave () {
 
 makeListToRemoveFilesNoSlaveMode () {
 	debugPrint "makeListToRemoveFilesNoSlaveMode(): ..."
-  debugPrint "find  ${masterOutboundWal} -name '0*'  | sort -k 1nr > ${listOfFilesToRemove}"
-  find  ${masterOutboundWal} -name '0*'  | sort -k 1nr > ${listOfFilesToRemove}         
+  debugPrint "find  ${masterOutboundWal} -name '0*' -type f  | sort -k 1nr > ${listOfFilesToRemove}"
+  find  ${masterOutboundWal} -name '0*'  -type f | sort -k 1nr > ${listOfFilesToRemove}         
 	debugPrint "DONE"
 } 
 
@@ -329,7 +344,8 @@ makeListToRemoveFiles () {
 		else
 			debugPrint "List files to be removed"
 			baseFileName=`basename ${walRecievedlowestTimeFile}`
-			find  ${masterOutboundWal} ! -newer ${walRecievedlowestTimeFile} ! -name ${baseFileName}  | sort -k 1nr > ${listOfFilesToRemove}
+			debugPrint "find  ${masterOutboundWal} ! -newer ${walRecievedlowestTimeFile} ! -name ${baseFileName} -type f  | sort -k 1nr > ${listOfFilesToRemove}"
+			find  ${masterOutboundWal} ! -newer ${walRecievedlowestTimeFile} ! -name ${baseFileName} -type f  | sort -k 1nr > ${listOfFilesToRemove}
 			debugPrint "echo ${walRecievedlowestTimeFile} > ${previousAckFile}"
 			echo ${walRecievedlowestTimeFile} > ${previousAckFile}
 			debugPrint "List generated at ${listOfFilesToRemove}"
@@ -339,6 +355,53 @@ makeListToRemoveFiles () {
 }
 
 
+
+
+checkForPendingList () {
+   debugPrint "checkForPendingList (): ..."
+   if [ -f ${pendingRemoveList} ] ;
+   then
+     vFileIsEmpty=`checkFileIsEmpty ${pendingRemoveList}`
+     if [ ${vFileIsEmpty} = "false" ];
+     then
+        lastListedFile=`tail -1 ${pendingRemoveList}`
+        if [ -f ${lastListedFile} ];
+        then
+           logPrint "WARNING: Pending list exists. Generating new list from that...\n"
+				   debugPrint "${local_rename}  ${vTmplistOfFilesToRemove} ${listOfFilesToRemove}"
+				   cat ${pendingRemoveList} > ${listOfFilesToRemove}
+           gvStartFromPendingList=1
+           logPrint "DONE\n"
+        else
+           gvStartFromPendingList=0
+        fi
+     fi #if [ ${vFileIsEmpty} = "false" ];
+   fi #if [ -f ${listOfFilesToRemove} ] ;
+
+   debugPrint "gvStartFromPendingList=${gvStartFromPendingList}"
+   debugPrint "checkForPendingList() ... DONE"
+
+} #checkForPendingList
+
+
+
+createPendingRemoveList () {
+  debugPrint "createPendingRemoveList () ..."
+  lineNumber=${1}
+  debugPrint "lineNumber=${lineNumber}"
+  debugPrint "awk 'NR>"$lineNumber"' ${listOfFilesToRemove} >  ${pendingRemoveList}   "
+  awk 'NR>$lineNumber' ${listOfFilesToRemove} >  ${pendingRemoveList}   
+  vLines=`cat ${pendingRemoveList} | wc -l`
+  debugPrint "Lines in ${pendingRemoveList} = vLines"
+  if [ ${vLines} -eq 0 ];
+  then
+    debugPrint "${pendingRemoveList} is empty and removing"
+    ${local_remove} ${pendingRemoveList}
+  fi 
+  debugPrint "createPendingRemoveList () ...DONE"
+} 
+
+
 removeFiles () {
 
 	numberOfFilesToRemove=`cat ${listOfFilesToRemove} | wc -l`
@@ -346,24 +409,29 @@ removeFiles () {
 	i=0
 	for eachFile in  `cat ${listOfFilesToRemove}`
 	do
-	  
-	  cmd="${local_remove} ${eachFile}"
-	  debugPrint "${cmd}"
-	  if [ ${DRYRUN} -eq 0 ];
+	  if [ -f ${eachFile} ];
 	  then
-	     ${cmd}
-	     if [ $? -gt 0 ];
-	     then
-	        critical_error "Failed to remove file ${eachFile}"
-	     fi
-	  fi
-    logPrint "LOG: Removing file ${eachFile} ...OK\n"
-	  let i=${i}+1
-	  if [ ${i} -ge ${maxNumberFileToRemove} ];
-	  then
-	     logPrint "LOG: Stop removing file as maxNumberFileToRemove (${maxNumberFileToRemove}) reached\n" 
-	     break
-	  fi 
+		  cmd="${local_remove} ${eachFile}"
+		  debugPrint "${cmd}"
+		  if [ ${DRYRUN} -eq 0 ];
+		  then
+		     ${cmd}
+		     if [ $? -gt 0 ];
+		     then
+		        critical_error "Failed to remove file ${eachFile}"
+		     fi
+		  fi # if [ ${DRYRUN} -eq 0 ];
+	    logPrint "LOG: Removing file ${eachFile} ...OK\n"
+		  let i=${i}+1
+		  if [ ${i} -ge ${maxNumberFileToRemove} ];
+		  then
+		     logPrint "LOG: Stop removing file as maxNumberFileToRemove (${maxNumberFileToRemove}) reached\n" 
+		     createPendingRemoveList ${i}
+		     break
+		  fi #if [ ${i} -ge ${maxNumberFileToRemove} ];
+		else
+		  logPrint "WARNING: File ${eachFile} has already been removed\n"
+		fi  
 	done
 	
 	debugPrint "removeFiles (): Removed files ${i} of ${numberOfFilesToRemove} "
@@ -390,7 +458,7 @@ checkFileThresholdForNoSlaveMode () {
    debugPrint "numberOfFileInOutboundwal = ${numberOfFileInOutboundwal}"
    if [  ${numberOfFileInOutboundwal} -ge ${maxFileAllowedInOutboundwal} ];
    then
-      logPrint "CRITICAL: maxFileAllowedInOutboundwal (${maxFileAllowedInOutboundwal} reached. Enabling NOSLAVE mode\n"
+      logPrint "CRITICAL: maxFileAllowedInOutboundwal (${maxFileAllowedInOutboundwal}) reached. Enabling NOSLAVE mode\n"
       for eachSlave in `cat ${slaveConf}`
       do
         validIP=`checkValidIP ${eachSlave}`
@@ -427,6 +495,7 @@ checkOutboundwalFiles () {
       exit $STATE_OK
    fi 
 }
+
 
 
 
@@ -526,60 +595,69 @@ checkLocalConfigValue
 checkSlavesConf
 checkProcessDir
 
-checkOutboundwalFiles # If no file at outbound wal the exit to systemi
+checkOutboundwalFiles # If number files is less than given threshold then exit to system
+checkForPendingList  # If pending list exists then remove using that list
 
-
-debugPrint "Empty ${listAckWalFiles}"
-> ${listAckWalFiles}
-
-debugPrint "Empty ${listOfFilesToRemove}"
-> ${listOfFilesToRemove}
-
-debugPrint "Read slaveconf and findSlaveLastWalRecieved () for each slave"
-for eachSlave in ` cat ${slaveConf}`
-do
-  debugPrint "#### Working for slave = ${eachSlave} ###"
-  
-  validIP=`checkValidIP ${eachSlave}`
-  debugPrint "IP validity = ${validIP}"
-  if [ ${validIP} = 'false' ];
-  then
-     logPrint "WARNING: Invalid IP in  ${slaveConf} =  ${eachSlave}\n"
-  else   
-     generateListOfAckWalFilesForSlave  ${eachSlave}
-  fi
-  debugPrint "--- DONE for slave = ${eachSlave} ---"
-done
-debugPrint "Generated listAckWalFiles = ${listAckWalFiles}"
-
-debugPrint "Find number of slaves active"
-numberOfSlaveActive=`cat ${listAckWalFiles} | wc -l`
-debugPrint "numberOfSlaveActive=${numberOfSlaveActive}"
-
-if [ ${numberOfSlaveActive} -eq 0 ];
+if [ ${gvStartFromPendingList} -eq 0 ];
 then
-   logPrint "CRITICAL: Enabling NoSlave mode...DONE\n"
-	 noSlaveMode=1
-fi	 
 
-if [ ${noSlaveMode} -eq 1 ];
-then
-  makeListToRemoveFilesNoSlaveMode
-else
-  makeListToRemoveFiles
-fi
+	debugPrint "Empty ${listAckWalFiles}"
+	> ${listAckWalFiles}
+	
+	debugPrint "Empty ${listOfFilesToRemove}"
+	> ${listOfFilesToRemove}
+	
+	debugPrint "Read slaveconf and findSlaveLastWalRecieved () for each slave"
+	for eachSlave in ` cat ${slaveConf}`
+	do
+	  debugPrint "#### Working for slave = ${eachSlave} ###"
+	  
+	  validIP=`checkValidIP ${eachSlave}`
+	  debugPrint "IP validity = ${validIP}"
+	  if [ ${validIP} = 'false' ];
+	  then
+	     logPrint "WARNING: Invalid IP in  ${slaveConf} =  ${eachSlave}\n"
+	  else   
+	     generateListOfAckWalFilesForSlave  ${eachSlave}
+	  fi
+	  debugPrint "--- DONE for slave = ${eachSlave} ---"
+	done
+	debugPrint "Generated listAckWalFiles = ${listAckWalFiles}"
+	
+	debugPrint "Find number of slaves active"
+	numberOfSlaveActive=`cat ${listAckWalFiles} | wc -l`
+	debugPrint "numberOfSlaveActive=${numberOfSlaveActive}"
+	
+	if [ ${numberOfSlaveActive} -eq 0 ];
+	then
+	   logPrint "CRITICAL: Enabling NoSlave mode...DONE\n"
+		 noSlaveMode=1
+	fi	 
+	
+	if [ ${noSlaveMode} -eq 1 ];
+	then
+	  makeListToRemoveFilesNoSlaveMode
+	else
+	  makeListToRemoveFiles
+	fi
+fi #if [ ${gvStartFromPendingList} -eq 0 ];
 
 removeFiles
 
-if [ -z ${walRecievedlowestTimeFile} ];
+if [ ${gvStartFromPendingList} -eq 0 ];
 then
-   logPrint "LOG: Removed files in no slave mode\n"
-elif [ ${walRecievedlowestTimeFile} = "WAITING" ];
-then
-   logPrint "LOG: Maintaining slave ${walRecievedlowestTimeSlave} - WAITING for acknowledgement\n"
+	if [ -z ${walRecievedlowestTimeFile} ];
+	then
+	   logPrint "LOG: Removed files in no slave mode\n"
+	elif [ ${walRecievedlowestTimeFile} = "WAITING" ];
+	then
+	   logPrint "LOG: Maintaining slave ${walRecievedlowestTimeSlave} - WAITING for acknowledgement\n"
+	else
+	   logPrint "LOG: Maintaining slave ${walRecievedlowestTimeSlave} - file kept ${walRecievedlowestTimeFile} (${walRecievedlowestTime}) and after \n"
+	fi
 else
-   logPrint "LOG: Maintaining slave ${walRecievedlowestTimeSlave} - file kept ${walRecievedlowestTimeFile} (${walRecievedlowestTime}) and after \n"
-fi
+  logPrint "LOG: Removed files from pending list\n"	
+fi #if [ ${gvStartFromPendingList} -eq 0 ];
 
 checkFileThresholdForNoSlaveMode
 exitWithSuccess 
